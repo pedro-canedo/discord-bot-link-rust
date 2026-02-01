@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  discord-bot:
+    build: .
+    container_name: discord-rust-link-bot
+    restart: unless-stopped
+    environment:
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
+      - PORT=3000
+      - OXIDE_PERMISSIONS_PATH=/data/oxide/users.json
+      - PERMISSION_NAME=kits.linkdiscord
+    volumes:
+      - ./data:/app/data
+      - /caminho/para/oxide/users.json:/data/oxide/users.json:rw
+    ports:
+      - "3000:3000"
+    networks:
+      - bot-network
+
+networks:
+  bot-network:
+    driver: bridge
+

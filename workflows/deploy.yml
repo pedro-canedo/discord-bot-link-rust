@@ -1,0 +1,17 @@
+name: Deploy to Coolify
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to Coolify
+        run: |
+          echo "Deploy será feito automaticamente pelo Coolify via webhook"
+          echo "Certifique-se de que o webhook está configurado no Coolify"
+
