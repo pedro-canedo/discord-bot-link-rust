@@ -6,6 +6,7 @@ const fs = require('fs-extra');
 const path = require('path');
 const { handleAuthCallback, generateAuthUrl } = require('./auth');
 const { linkAccount, grantPermission } = require('./permissions');
+const { createBugModal, handleBugModalSubmit, handleBacklogButton, setupBoardInChannel } = require('./backlog');
 
 const app = express();
 app.use(cors());
@@ -84,6 +85,29 @@ client.on('interactionCreate', async interaction => {
             ephemeral: true
         });
     }
+
+    if (interaction.commandName === 'bug') {
+        const modal = createBugModal();
+        await interaction.showModal(modal);
+    }
+
+    if (interaction.commandName === 'backlog-board') {
+        await interaction.deferReply({ ephemeral: true });
+        await setupBoardInChannel(interaction, client);
+        await interaction.editReply({ content: '✅ Quadro de backlog criado/atualizado neste canal.', ephemeral: true });
+    }
+});
+
+// Modal submit (formulário de BUG) e botões do backlog
+client.on('interactionCreate', async interaction => {
+    if (interaction.isModalSubmit()) {
+        const handled = await handleBugModalSubmit(interaction, client);
+        if (handled) return;
+    }
+    if (interaction.isButton()) {
+        const handled = await handleBacklogButton(interaction, client);
+        if (handled) return;
+    }
 });
 
 // Quando o bot está pronto
@@ -107,6 +131,14 @@ client.once('ready', () => {
         {
             name: 'status',
             description: 'Verifica o status da linkagem da sua conta'
+        },
+        {
+            name: 'bug',
+            description: 'Abre um BUG / atividade de backlog (formulários Scrum + lista todo)'
+        },
+        {
+            name: 'backlog-board',
+            description: 'Cria ou atualiza a mensagem de lista (To Do / In Progress / Completed) neste canal'
         }
     ];
 
