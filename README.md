@@ -45,6 +45,7 @@ PERMISSION_NAME=kits.linkdiscord
 OPEN_API_KEY=sk-...          # Chave da API OpenAI para refinar textos
 OPEN_API_URL=https://api.openai.com/v1
 BACKLOG_CHANNEL_ID=           # ID do canal onde as atividades de backlog serão publicadas (vazio = mesmo canal do comando)
+BACKLOG_WEBHOOK_URL=          # URL do webhook do Discord para enviar backlog para um canal (lista + novos bugs)
 ```
 
 ### 3. Deploy no Coolify

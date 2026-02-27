@@ -12,6 +12,7 @@ const {
 
 const OPEN_API_URL = process.env.OPEN_API_URL || 'https://api.openai.com/v1';
 const OPEN_API_KEY = process.env.OPEN_API_KEY;
+const BACKLOG_WEBHOOK_URL = process.env.BACKLOG_WEBHOOK_URL;
 
 const BUG_MODAL_ID = 'backlog_bug_modal';
 const DATA_DIR = path.join(__dirname, '../data');
@@ -57,12 +58,64 @@ async function getBoard(guildId) {
     return data[guildId] || null;
 }
 
-/** Salva referência do quadro (mensagem de lista) do guild. */
-async function setBoard(guildId, channelId, messageId) {
+/** Salva referência do quadro do guild. setBoard(guildId, { channelId, messageId?, webhookMessageId? }) ou setBoard(guildId, channelId, messageId). */
+async function setBoard(guildId, channelIdOrData, messageId) {
     await fs.ensureDir(DATA_DIR);
-    const data = await fs.readJSON(BOARD_FILE).catch(() => ({}));
-    data[guildId] = { channelId, messageId };
-    await fs.writeJSON(BOARD_FILE, data, { spaces: 2 });
+    const all = await fs.readJSON(BOARD_FILE).catch(() => ({}));
+    const prev = all[guildId] || {};
+    const data = typeof channelIdOrData === 'object' && channelIdOrData !== null
+        ? channelIdOrData
+        : { channelId: channelIdOrData, messageId };
+    all[guildId] = { ...prev, ...data };
+    await fs.writeJSON(BOARD_FILE, all, { spaces: 2 });
+}
+
+/** Envia mensagem via webhook (POST). Retorna { id } da mensagem ou null. */
+async function sendWebhook(payload) {
+    if (!BACKLOG_WEBHOOK_URL) return null;
+    try {
+        const body = typeof payload.embeds !== 'undefined'
+            ? { ...payload, embeds: payload.embeds.map(e => (e && e.toJSON ? e.toJSON() : e)) }
+            : payload;
+        const res = await fetch(BACKLOG_WEBHOOK_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        if (!res.ok) {
+            console.error('Webhook POST falhou:', res.status, await res.text());
+            return null;
+        }
+        const msg = await res.json();
+        return msg.id ? { id: msg.id } : null;
+    } catch (e) {
+        console.error('Erro ao enviar webhook:', e);
+        return null;
+    }
+}
+
+/** Atualiza mensagem do webhook (PATCH). */
+async function editWebhookMessage(messageId, payload) {
+    if (!BACKLOG_WEBHOOK_URL || !messageId) return false;
+    const url = `${BACKLOG_WEBHOOK_URL}/messages/${messageId}`;
+    try {
+        const body = typeof payload.embeds !== 'undefined'
+            ? { ...payload, embeds: payload.embeds.map(e => (e && e.toJSON ? e.toJSON() : e)) }
+            : payload;
+        const res = await fetch(url, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        if (!res.ok) {
+            console.error('Webhook PATCH falhou:', res.status, await res.text());
+            return false;
+        }
+        return true;
+    } catch (e) {
+        console.error('Erro ao editar mensagem do webhook:', e);
+        return false;
+    }
 }
 
 /**
@@ -292,7 +345,7 @@ function buildMessageFromActivity(activity) {
     return { embeds: [embed], components: row ? [row] : [] };
 }
 
-/** Monta o embed da lista todo (quadro) e atualiza a mensagem no canal. */
+/** Monta o embed da lista todo (quadro) e atualiza no canal do bot e/ou no webhook. */
 async function createOrUpdateBoard(client, guildId, channel) {
     const activities = await getActivities(guildId);
     const open = activities.filter(a => a.status === STATUS_OPEN);
@@ -321,20 +374,39 @@ async function createOrUpdateBoard(client, guildId, channel) {
         .setTimestamp();
 
     const board = await getBoard(guildId);
-    try {
-        if (board?.channelId && board?.messageId) {
-            const ch = await client.channels.fetch(board.channelId).catch(() => null);
-            const msg = ch ? await ch.messages.fetch(board.messageId).catch(() => null) : null;
-            if (msg) {
-                await msg.edit({ embeds: [embed], components: [] });
-                return;
+
+    // Atualizar ou criar mensagem no canal do bot (se tiver client + channel)
+    if (client && channel) {
+        try {
+            if (board?.channelId && board?.messageId) {
+                const ch = await client.channels.fetch(board.channelId).catch(() => null);
+                const msg = ch ? await ch.messages.fetch(board.messageId).catch(() => null) : null;
+                if (msg) {
+                    await msg.edit({ embeds: [embed], components: [] });
+                } else {
+                    const sent = await channel.send({ embeds: [embed] });
+                    await setBoard(guildId, { channelId: channel.id, messageId: sent.id });
+                }
+            } else {
+                const sent = await channel.send({ embeds: [embed] });
+                await setBoard(guildId, { channelId: channel.id, messageId: sent.id });
+            }
+        } catch (e) {
+            console.error('Erro ao atualizar quadro backlog (canal):', e);
+        }
+    }
+
+    // Enviar ou atualizar lista via webhook
+    if (BACKLOG_WEBHOOK_URL) {
+        if (board?.webhookMessageId) {
+            await editWebhookMessage(board.webhookMessageId, { embeds: [embed] });
+        } else {
+            const result = await sendWebhook({ embeds: [embed] });
+            if (result?.id) {
+                await setBoard(guildId, { webhookMessageId: result.id });
             }
         }
-    } catch (e) {
-        console.error('Erro ao atualizar quadro backlog:', e);
     }
-    const sent = await channel.send({ embeds: [embed] });
-    await setBoard(guildId, channel.id, sent.id);
 }
 
 /**
@@ -365,9 +437,9 @@ async function handleBugModalSubmit(interaction, client) {
         ? interaction.guild?.channels.cache.get(backlogChannelId)
         : interaction.channel;
 
-    if (!channel) {
+    if (!channel && !BACKLOG_WEBHOOK_URL) {
         await interaction.editReply({
-            content: '❌ Canal de backlog não configurado (`BACKLOG_CHANNEL_ID`) ou canal não encontrado. Atividade não publicada.',
+            content: '❌ Configure `BACKLOG_CHANNEL_ID` ou `BACKLOG_WEBHOOK_URL` para publicar atividades.',
             ephemeral: true
         });
         return true;
@@ -378,7 +450,7 @@ async function handleBugModalSubmit(interaction, client) {
     const activity = {
         id: activityId,
         guildId: interaction.guild.id,
-        channelId: channel.id,
+        channelId: channel?.id ?? null,
         messageId: null,
         titulo: tituloFinal,
         descricao: refined?.descricao ?? descricao,
@@ -394,11 +466,18 @@ async function handleBugModalSubmit(interaction, client) {
     await saveActivity(activity);
 
     const embed = buildBacklogEmbed(interaction.user, raw, refined, { id: activityId, status: STATUS_OPEN });
-    const row = buildActivityButtons(activityId, STATUS_OPEN);
-    const components = row ? [row] : [];
-    const sent = await channel.send({ embeds: [embed], components });
-    activity.messageId = sent.id;
-    await saveActivity(activity);
+
+    if (channel) {
+        const row = buildActivityButtons(activityId, STATUS_OPEN);
+        const components = row ? [row] : [];
+        const sent = await channel.send({ embeds: [embed], components });
+        activity.messageId = sent.id;
+        await saveActivity(activity);
+    }
+
+    if (BACKLOG_WEBHOOK_URL) {
+        await sendWebhook({ embeds: [embed] });
+    }
 
     await createOrUpdateBoard(client, interaction.guild.id, channel);
 
@@ -446,10 +525,8 @@ async function handleBacklogButton(interaction, client) {
     }
 
     const board = await getBoard(guildId);
-    if (board?.channelId) {
-        const ch = await client.channels.fetch(board.channelId).catch(() => null);
-        if (ch) await createOrUpdateBoard(client, guildId, ch);
-    }
+    const ch = board?.channelId ? await client.channels.fetch(board.channelId).catch(() => null) : null;
+    await createOrUpdateBoard(client, guildId, ch);
 
     return true;
 }
